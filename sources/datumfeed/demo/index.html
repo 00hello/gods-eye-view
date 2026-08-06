@@ -1,0 +1,221 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Copyright (c) 2026 Datumfeed -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Datumfeed source — deck.gl demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0e12; color: #e8edf2;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #map { position: absolute; inset: 0; }
+  .panel { position: absolute; z-index: 2; background: rgba(11,14,18,.88);
+    border: 1px solid #2a3340; border-radius: 6px; padding: 10px 12px;
+    backdrop-filter: blur(6px); }
+  #status { top: 12px; left: 12px; max-width: 340px; }
+  #status h1 { margin: 0 0 6px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: #9fb3c8; }
+  #status dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+  #status dt { color: #7d8fa3; }
+  #status dd { margin: 0; }
+  #attribution { bottom: 12px; left: 12px; right: 12px; font-size: 12px; color: #b9c7d4; }
+  #frames { top: 12px; right: 12px; width: 260px; max-height: calc(100% - 24px); overflow-y: auto; }
+  #frames figure { margin: 0 0 6px; }
+  #frames img, #frames canvas { width: 100%; display: block; border-radius: 4px; border: 1px solid #2a3340; }
+  #frames figcaption { font-size: 10px; line-height: 1.4; color: #8fa1b4; margin-top: 3px; word-break: break-word; }
+  .ok { color: #00a878; } .warn { color: #e69f00; } .err { color: #d55e00; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="panel" id="status">
+  <h1>Datumfeed source</h1>
+  <dl>
+    <dt>bbox</dt><dd id="s-bbox">—</dd>
+    <dt>cameras</dt><dd id="s-cameras">loading…</dd>
+    <dt>polling</dt><dd id="s-polled">—</dd>
+    <dt>frames</dt><dd id="s-frames">0</dd>
+    <dt>cadence</dt><dd id="s-cadence">—</dd>
+    <dt>pixel read</dt><dd id="s-pixels">—</dd>
+    <dt>budget</dt><dd id="s-budget">—</dd>
+  </dl>
+</div>
+
+<div class="panel" id="frames"></div>
+<div class="panel" id="attribution">—</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "@deck.gl/core": "https://esm.sh/@deck.gl/core@9.3.7",
+    "@deck.gl/layers": "https://esm.sh/@deck.gl/layers@9.3.7?external=@deck.gl/core",
+    "@deck.gl/geo-layers": "https://esm.sh/@deck.gl/geo-layers@9.3.7?external=@deck.gl/core,@deck.gl/layers"
+  }
+}
+</script>
+
+<script type="module">
+import { Deck } from '@deck.gl/core';
+import { BitmapLayer } from '@deck.gl/layers';
+import { TileLayer } from '@deck.gl/geo-layers';
+
+import { DatumfeedSource, FramePoller } from '../datumfeed-source.js';
+import { createDatumfeedLayers, attributionText } from '../deckgl-layers.js';
+
+// Downtown Austin, a few blocks. Deliberately not the whole city: the
+// whole-city box (-97.94,30.10,-97.56,30.52) holds 583 cameras above the trust
+// threshold, and polling all of them at a 60 s cadence is 35,000 frame requests
+// an hour — 116x the anonymous budget. Small viewport, small bill.
+const BBOX = [-97.7480, 30.2650, -97.7390, 30.2700];
+
+// Fetch more cameras than we poll, so the map shows what the cap does: the
+// nearest MAX_FRAMES get live imagery, the rest stay points and cost nothing.
+const MAX_CAMERAS = 12;
+const MAX_FRAMES = 3;
+
+const VIEW = { longitude: -97.74625, latitude: 30.26896, zoom: 17.3, pitch: 22, bearing: 24 };
+
+const $ = (id) => document.getElementById(id);
+const setText = (id, text, cls) => {
+  const el = $(id);
+  el.textContent = text;            // never innerHTML: registry strings are third-party
+  if (cls) el.className = cls;
+};
+
+// No API key: the anonymous tier is 60 req/h browsing and 300/h on frames — a
+// few cameras' worth, which is what this demo is sized for. A host app would
+// pass {apiKey} from its own config and get 3,600 / 36,000.
+const source = new DatumfeedSource({
+  minTrust: 70,
+  onRateLimit: ({ scope, remaining, limit }) => {
+    budget[scope] = `${remaining}/${limit}`;
+    setText('s-budget', `browse ${budget.browse ?? '—'} · frame ${budget.frame ?? '—'}`);
+  }
+});
+const budget = {};
+
+let cameras = [];
+const poller = new FramePoller(source, {
+  maxWidth: 960,
+  maxFrames: MAX_FRAMES,
+  onFrame: (cameraId, frame) => {
+    setText('s-frames', String(poller.frames.size));
+    renderInspector(cameraId, frame);
+    redraw();
+  },
+  onError: (cameraId, error) => setText('s-pixels', `${cameraId}: ${error.message}`, 'err')
+});
+
+const deck = new Deck({
+  parent: $('map'),
+  initialViewState: VIEW,
+  controller: true,
+  onViewStateChange: ({ viewState }) => { VIEW.bearing = viewState.bearing; redraw(); },
+  layers: []
+});
+
+function basemap() {
+  return new TileLayer({
+    id: 'basemap',
+    data: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    minZoom: 0,
+    maxZoom: 19,
+    tileSize: 256,
+    renderSubLayers: (props) => {
+      const { west, south, east, north } = props.tile.bbox;
+      return new BitmapLayer(props, {
+        data: null,
+        image: props.data,
+        bounds: [west, south, east, north]
+      });
+    }
+  });
+}
+
+function redraw() {
+  deck.setProps({
+    layers: [
+      basemap(),
+      ...createDatumfeedLayers({
+        cameras,
+        frames: poller.frames,
+        // bearingDeg is null on every camera today, so footprints follow the view.
+        options: { viewportBearing: VIEW.bearing, nearM: 85, lengthM: 140 }
+      })
+    ]
+  });
+}
+
+function renderInspector(cameraId, frame) {
+  const camera = cameras.find((c) => c.id === cameraId);
+  if (!camera) return;
+
+  // Draw the decoded bitmap to a canvas and read a pixel back. This is the part
+  // that fails on a CORS-tainted image, so a number here is the actual proof
+  // that /frame gives real, readable pixels rather than a display-only <img>.
+  const canvas = document.createElement('canvas');
+  const scale = 240 / frame.bitmap.width;
+  canvas.width = 240;
+  canvas.height = Math.round(frame.bitmap.height * scale);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(frame.bitmap, 0, 0, canvas.width, canvas.height);
+
+  let pixelNote = 'blocked';
+  try {
+    const [r, g, b] = ctx.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data;
+    pixelNote = `rgb(${r},${g},${b})`;
+    setText('s-pixels', `${pixelNote} @ center — OK`, 'ok');
+  } catch (error) {
+    setText('s-pixels', `tainted canvas: ${error.message}`, 'err');
+  }
+
+  const figure = document.createElement('figure');
+  figure.append(canvas);
+  const caption = document.createElement('figcaption');
+  // Attribution travels with every single frame, not just the global credit line.
+  caption.textContent =
+    `${camera.name} · ${camera.registry.attribution}` +
+    (frame.fetchedAt ? ` · ${frame.fetchedAt.toISOString().slice(11, 19)}Z` : '') +
+    ` · ${pixelNote}`;
+  figure.append(caption);
+
+  figure.dataset.cam = cameraId;
+  // Replace in place. Replacing *and* appending would walk each camera to the
+  // bottom of the strip every time its frame refreshed.
+  const existing = document.querySelector(`[data-cam="${CSS.escape(cameraId)}"]`);
+  if (existing) existing.replaceWith(figure);
+  else $('frames').append(figure);
+}
+
+async function main() {
+  setText('s-bbox', BBOX.join(','));
+  redraw();
+
+  const { cameras: found, total } = await source.camerasInBbox(BBOX, { max: MAX_CAMERAS });
+  cameras = found;
+  setText('s-cameras', `${cameras.length} of ${total} in bbox (minTrust 70)`);
+
+  const registries = await source.registries();
+  const slugs = [...new Set(cameras.map((c) => c.registry.slug))];
+  setText('s-cadence', slugs.map((s) => `${s} ${registries.get(s)?.minPollIntervalS}s`).join(', '));
+
+  // The centre is what picks which cameras get frames: nearest MAX_FRAMES win,
+  // the rest render as points.
+  poller.setCameras(cameras, { center: [VIEW.longitude, VIEW.latitude] });
+  setText('s-polled', `${poller.polled.length} of ${cameras.length} (rest are points)`);
+  setText('attribution', attributionText(poller.attributions) + ' · Basemap © OpenStreetMap contributors');
+  redraw();
+
+  window.__datumfeedReady = true;
+}
+
+main().catch((error) => {
+  setText('s-cameras', error.message, 'err');
+  window.__datumfeedError = error.message;
+});
+</script>
+</body>
+</html>
