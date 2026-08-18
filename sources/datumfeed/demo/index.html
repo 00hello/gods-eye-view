@@ -113,7 +113,8 @@ const deck = new Deck({
   parent: $('map'),
   initialViewState: VIEW,
   controller: true,
-  onViewStateChange: ({ viewState }) => { VIEW.bearing = viewState.bearing; redraw(); },
+  // No redraw on view change: billboards stay upright by construction, so
+  // nothing about the layers depends on where the camera is looking.
   layers: []
 });
 
@@ -142,8 +143,9 @@ function redraw() {
       ...createDatumfeedLayers({
         cameras,
         frames: poller.frames,
-        // bearingDeg is null on every camera today, so footprints follow the view.
-        options: { viewportBearing: VIEW.bearing, nearM: 85, lengthM: 140 }
+        // Upright cards pinned at each camera. These are street views of mostly
+        // vertical things, which is exactly what a ground projection ruins.
+        options: { mode: 'billboard', widthPx: 156 }
       })
     ]
   });

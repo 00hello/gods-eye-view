@@ -1,21 +1,21 @@
 # Datumfeed source
 
 A data source for public traffic-camera feeds: fetch cameras by viewport, pull
-their current frames, project them onto the map.
+their current frames, put them on the map.
 
 [Datumfeed](https://datumfeed.com) is a free API that catalogues public camera
 registries, health-polls them, and scores each camera for trust. As of August
 2026 it lists **8,507 active cameras across 6 registries** — Austin, Caltrans,
 Ontario 511, Ottawa, TfL (London) and WSDOT. No key is needed to try it.
 
-![Three live downtown Austin cameras projected onto the map as ground footprints](demo/proof.png)
+![Three live downtown Austin cameras standing on the map as upright frame cards](demo/proof.png)
 
 ## Files
 
 | File | What it is |
 | --- | --- |
 | `datumfeed-source.js` | The client. Zero imports, no DOM assumptions — usable from any renderer. |
-| `deckgl-layers.js` | deck.gl binding: `BitmapLayer` ground footprints + a `ScatterplotLayer` of camera positions. |
+| `deckgl-layers.js` | deck.gl binding: an upright `IconLayer` card per live frame + a `ScatterplotLayer` of camera positions. |
 | `demo/index.html` | Standalone demo, no build step. Open it and it runs. |
 
 ## Quick start
@@ -39,7 +39,7 @@ const poller = new FramePoller(source, {
 const build = () => createDatumfeedLayers({
   cameras,                          // all of them, as points
   frames: poller.frames,            // only the polled ones have imagery
-  options: { viewportBearing: viewState.bearing }
+  options: { widthPx: 150 }         // upright cards; see "Configuration"
 });
 
 poller.setCameras(cameras, { center: CENTER });
@@ -131,7 +131,26 @@ uptime and freshness, and it composes.
 
 ```js
 createDatumfeedLayers({ cameras, frames, options: {
+  mode: 'billboard',          // the default
   showPoints: true,
+  widthPx: 150,               // card width on screen; height follows the frame
+  borderPx: 2,
+  stemPx: 12,                 // stem from the card down to the camera position
+  borderColor: '#0b0e12',
+  opacity: 1
+}});
+```
+
+Frames stand upright at their camera, facing the viewer at any pitch or
+bearing. That is the default because these cameras look at vertical things —
+facades, vehicles, people — and laying that flat on the ground smears it along
+the view axis and leaves the frame's edges as jagged trapezoid seams. The
+ground projection is still there for top-down views, where it is the honest
+one:
+
+```js
+createDatumfeedLayers({ cameras, frames, options: {
+  mode: 'footprint',
   nearM: 25,                  // distance to the near edge of the footprint
   lengthM: 150,               // how far it runs — the size knob
   opacity: 0.92,
@@ -154,11 +173,12 @@ rediscovered:
 - **`bearingDeg` is null on every camera** in all six registries today. The
   field exists but nothing populates it, so a footprint's orientation has to be
   chosen by the app. `bearingFallback: 'viewport'` lays each footprint along the
-  view direction, which keeps imagery upright from any angle; the day the field
-  is populated the real bearing is used automatically, no code change.
-- **Footprint width comes from the frame's own aspect ratio**, not an assumed
-  field of view. No registry publishes camera optics, and a guessed FOV only
-  ever stretches or squashes the picture.
+  view direction; the day the field is populated the real bearing is used
+  automatically, no code change. Upright cards never ask the question, which is
+  part of why they are the default.
+- **Card and footprint proportions come from the frame's own aspect ratio**,
+  not an assumed field of view. No registry publishes camera optics, and a
+  guessed FOV only ever stretches or squashes the picture.
 - **`minPollIntervalS` is only on `GET /api/registries`.** The `registry` object
   embedded in each camera omits it, so the cadence has to be fetched separately
   and cached. `datumfeed-source.js` does this once per process.
